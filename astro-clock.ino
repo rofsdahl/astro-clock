@@ -1,21 +1,20 @@
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
 #include <time.h>
 #include <esp_sntp.h>
+#include <esp_system.h>
 #include "nexa-tx.h"
 
-#ifdef DEBUG
-  #define DEBUG_BEGIN(...)   Serial.begin(__VA_ARGS__)
-  #define DEBUG_PRINTF(...)  Serial.printf(__VA_ARGS__)
-  #define DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
-#else
-  #define DEBUG_BEGIN(...)   // Blank line - no code
-  #define DEBUG_PRINTF(...)  // Blank line - no code
-  #define DEBUG_PRINTLN(...) // Blank line - no code
-#endif
+#define DEBUG_BEGIN(...)   Serial.begin(__VA_ARGS__)
+#define DEBUG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+#define DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
+//#define DEBUG_BEGIN(...)   // Blank line - no code
+//#define DEBUG_PRINTF(...)  // Blank line - no code
+//#define DEBUG_PRINTLN(...) // Blank line - no code
 
 #define PIN_LEFT_BUTTON    0
 #define PIN_RIGHT_BUTTON  35
@@ -42,9 +41,18 @@ struct SunTimes {
   bool valid;
 };
 
+struct Forecast {
+  float temp;
+};
+
 struct Line {
   int8_t x1, y1, x2, y2;
 };
+
+constexpr double LAT_DEG = 59.872;
+constexpr double LON_DEG = 10.797;
+constexpr double SOLAR_ALT_DEG = -0.833;
+constexpr int ALTITUDE_M = 120;
 
 TFT_eSPI tft = TFT_eSPI();
 NexaTx nexaTx = NexaTx(PIN_RF_TX);
@@ -52,6 +60,13 @@ Preferences preferences;
 volatile bool wifiStaGotIp = false;
 volatile bool ntpSyncDone = false;
 struct tm tBoot = {0};
+uint32_t rebootCount;
+esp_reset_reason_t resetReason;
+unsigned long tLastDisplayUpdate = 0;
+unsigned long tLastWifiAttempt = 0;
+unsigned long tLastWeatherForecast = 0;
+unsigned long tLastNexaUpdate = 0;
+unsigned long tLastAstroUpdate = 0;
 
 // ===========================
 // Network functions
@@ -77,14 +92,58 @@ void connectWiFi() {
   WiFi.begin(ssid.c_str(), password.c_str());
 }
 
+Forecast getWeatherForecast() {
+  DEBUG_PRINTF("Heap before HTTP: %u\n", ESP.getFreeHeap());
+  DEBUG_PRINTF("Min heap so far: %u\n", ESP.getMinFreeHeap());
+  size_t largestFree = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  DEBUG_PRINTF("Largest free block: %u\n", largestFree);
+
+  //if (funny business detected)
+  //  ESP.restart();
+
+  HTTPClient http;
+  char url[150];
+  snprintf(url, sizeof(url),
+    "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=%.3f&lon=%.3f&altitude=%d",
+    LAT_DEG, LON_DEG, ALTITUDE_M);
+  http.begin(url);
+  http.addHeader("User-Agent", "ESP32 AstroClock https://github.com/rofsdahl/astro-clock");
+  int httpCode = http.GET();
+
+  Forecast forecast{ 0 };
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    DEBUG_PRINTF("Payload length: %d\n", payload.length());
+
+    DynamicJsonDocument doc(4096);
+    DeserializationError err = deserializeJson(doc, payload);
+
+    DEBUG_PRINTF("Heap after JSON: %u\n", ESP.getFreeHeap());
+
+    if (!err) {
+      forecast.temp = doc["properties"]["timeseries"][0]["data"]["instant"]["details"]["air_temperature"];
+      DEBUG_PRINTF("Temp: %0.1f\n", forecast.temp);
+    }
+    else {
+      DEBUG_PRINTF("JSON error: %s\n", err.c_str());
+    }
+  }
+  else {
+    DEBUG_PRINTF("HTTP error: %d\n", httpCode);
+  }
+  http.end();
+
+  delay(1000);
+  DEBUG_PRINTF("Heap after HTTP: %u\n", ESP.getFreeHeap());
+
+  return forecast;
+}
+
 // ===========================
 // Astronomical calcuations
 // ===========================
 
 SunTimes calcSunTimes(const tm& t) {
-  constexpr double LAT = 59.9 * PI / 180.0;
-  constexpr double LON = 10.73; // Oslo
-  constexpr double SOLAR_ALT = -0.833 * PI / 180.0;
 
   // Approximate solar noon in days
   double d = t.tm_yday + 0.5;
@@ -112,9 +171,11 @@ SunTimes calcSunTimes(const tm& t) {
   );
 
   // Hour angle with horizon correction
+  static constexpr double latitudeRad = LAT_DEG * PI / 180.0;
+  static constexpr double solarAltRad = SOLAR_ALT_DEG * PI / 180.0;
   double cosH =
-      (sin(SOLAR_ALT) - sin(LAT) * sin(decl)) /
-      (cos(LAT) * cos(decl));
+      (sin(solarAltRad) - sin(latitudeRad) * sin(decl)) /
+      (cos(latitudeRad) * cos(decl));
 
   SunTimes s{ -1, -1, false };
   if (cosH < -1.0 || cosH > 1.0) {
@@ -132,7 +193,7 @@ SunTimes calcSunTimes(const tm& t) {
   double sunsetSolar  = 12.0 * 60.0 + daylight / 2.0;
 
   // UTC values
-  double lonCorr = 4.0 * LON;
+  double lonCorr = 4.0 * LON_DEG;
   double sunriseUTC = sunriseSolar - eqTime - lonCorr;
   double sunsetUTC  = sunsetSolar  - eqTime - lonCorr;
 
@@ -239,6 +300,7 @@ void drawTransmitIcon(int x, int y, uint16_t color, bool on, bool tx) {
 
 void updateDisplay(
     const tm& t,
+    Forecast forecast,
     SunTimes sun,
     double moonPhase,
     bool wifiConnected,
@@ -247,6 +309,7 @@ void updateDisplay(
     
   // Time
   constexpr uint8_t yTime = 0;
+  int w = 0;
   char buf[25];
   strftime(buf, sizeof(buf), " %H:%M ", &t);
   tft.setTextDatum(TC_DATUM);
@@ -258,16 +321,20 @@ void updateDisplay(
   strftime(buf, sizeof(buf), " %a %e. %b ", &t);
   tft.drawString(buf, 67, yDate, 4);
 
-  // Next
-  constexpr uint8_t yNext = 75;
-  tft.drawLine(0, yNext-3, X_MAX, yNext-3, TFT_DARKGREY);
+  tft.setTextDatum(TL_DATUM);
+
+  // Temp
+  constexpr uint8_t yTemp = 78;
+  tft.drawLine(0, yTemp-3, X_MAX, yTemp-3, TFT_DARKGREY);
+  snprintf(buf, sizeof(buf), "%0.1f *C", forecast.temp);
+  w = tft.drawString(buf, 0, yTemp, 4);
+  tft.fillRect(0+w, yTemp, X_MAX-w, 26, TFT_BLACK);
 
   // Sunrise
   constexpr uint8_t ySunrise = 146;
   tft.drawLine(0, ySunrise-4, X_MAX, ySunrise-4, TFT_DARKGREY);
   snprintf(buf, sizeof(buf), "%02d:%02d", sun.sunriseMin / 60, sun.sunriseMin % 60);
-  tft.setTextDatum(TL_DATUM);
-  int w = tft.drawString(buf, 43, ySunrise, 4);
+  w = tft.drawString(buf, 43, ySunrise, 4);
   tft.fillRect(43+w, ySunrise, X_MAX-20-43-w, 26, TFT_BLACK);
 
   // Sunset
@@ -281,14 +348,16 @@ void updateDisplay(
   tft.drawLine(0, yStatus-4, X_MAX, yStatus-4, TFT_DARKGREY);
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+
+  snprintf(buf, sizeof(buf), "Astro Clock %d:%d", rebootCount, resetReason);
+  tft.drawString(buf, X_MAX, yStatus+9, 2);
   strftime(buf, sizeof(buf), "%d.%m.%y %H:%M", &tBoot);
-  tft.drawString("Astro Clock", X_MAX, yStatus+9, 2);
   tft.drawString(buf, X_MAX, yStatus+24, 2);
 
   if (drawIcons) {
     drawSunriseIcon  (0, ySunrise);
     drawSunsetIcon   (0, ySunset);
-    drawMoonPhaseIcon(X_MAX-21, ySunset, moonPhase);
+    drawMoonPhaseIcon(X_MAX-21, ySunrise, moonPhase);
     drawTransmitIcon (0, yStatus, TFT_BLUE, wifiConnected, false);
     drawTransmitIcon (0, yStatus+20, TFT_YELLOW, nexaOn, false);
   }
@@ -320,6 +389,16 @@ bool updateNexa(uint16_t dayMin, SunTimes sun) {
   bool isNexaOn = isNight && !isQuiet;
   transmitNexa(isNexaOn);
   return isNexaOn;
+}
+
+void updateWeather() {
+  tLastWeatherForecast = 0;
+  drawTransmitIcon(0, 223, TFT_MAGENTA, false, false);
+}
+
+void reboot() {
+  preferences.putUInt("rebootCount", 0);
+  ESP.restart();
 }
 
 // ===========================
@@ -390,6 +469,7 @@ int menuSystem(const MenuItem items[],
       waitUntilBothReleased();
     }
   }
+  DEBUG_PRINTLN("This should never happen");
   return -1;
 }
 
@@ -510,6 +590,8 @@ void mainMenu() {
     {"Nexa ON", transmitNexaOn},
     {"Nexa OFF", transmitNexaOff},
     {"WiFi config", wifiConfigMenu},
+    {"Get weather", updateWeather},
+    {"Reboot", reboot},
     {"Exit", nullptr}
   };
   static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
@@ -521,27 +603,6 @@ void mainMenu() {
 // Main functions
 // ===========================
 
-void setup() {
-  DEBUG_BEGIN(115200);
-  delay(2000);
-  DEBUG_PRINTLN("---");
-  DEBUG_PRINTF("%s %s %s\n", "Astro Clock", __DATE__, __TIME__);
-  pinMode(PIN_LEFT_BUTTON, INPUT);
-  pinMode(PIN_RIGHT_BUTTON, INPUT);
-  btStop();
-  tft.init();
-  tft.setRotation(0);
-  tft.setTextSize(1);
-  tft.fillScreen(TFT_BLACK);
-  preferences.begin("wifi", false);
-  WiFi.onEvent(onWiFiEvent);
-  WiFi.mode(WIFI_STA);
-
-  // Configure NTP/DST
-  sntp_set_time_sync_notification_cb(onTimeSync);
-  configTzTime("CET-1CEST,M3.5.0/2,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
-}
-
 void loop() {
 
   // Time
@@ -549,21 +610,20 @@ void loop() {
   getLocalTime(&t, 100);
 
   // State variables
+  static Forecast forecast = { 0 };
   static SunTimes sun = { -1, -1, false };
   static double moonPhase = 0.0;
   static bool isWifiConnected = false;
   static bool isNexaOn = false;
 
   // Display
-  static unsigned long tLastDisplayUpdate = 0;
   if (tLastDisplayUpdate == 0 || millis()-tLastDisplayUpdate > 1*SEC) {
     bool drawIcons = tLastDisplayUpdate == 0;
-    updateDisplay(t, sun, moonPhase, isWifiConnected, isNexaOn, drawIcons);
+    updateDisplay(t, forecast, sun, moonPhase, isWifiConnected, isNexaOn, drawIcons);
     tLastDisplayUpdate = millis();
   }
 
   // WiFi
-  static unsigned long tLastWifiAttempt = 0;
   if (WiFi.status() != WL_CONNECTED) {
     isWifiConnected = false;
     if (tLastWifiAttempt == 0 || millis()-tLastWifiAttempt > 10*SEC) {
@@ -580,8 +640,16 @@ void loop() {
     wifiStaGotIp = false;
   }
 
+  // Weather weather forecast
+  if (WiFi.status() == WL_CONNECTED) {
+    if (tLastWeatherForecast == 0 || millis()-tLastWeatherForecast >= 10*MIN) {
+      DEBUG_PRINTLN("Weather...");
+      forecast = getWeatherForecast();
+      tLastWeatherForecast = millis();
+    }
+  }
+
   // Nexa update
-  static unsigned long tLastNexaUpdate = 0;
   if (tLastNexaUpdate == 0 || millis()-tLastNexaUpdate >= 10*MIN) {
     DEBUG_PRINTLN("Nexa...");
     uint16_t dayMin = t.tm_hour * 60+t.tm_min;
@@ -591,7 +659,6 @@ void loop() {
   }
 
   // Astro calculations
-  static unsigned long tLastAstroUpdate = 0;
   if (tLastAstroUpdate == 0 || millis()-tLastAstroUpdate >= 1*HOUR) {
     DEBUG_PRINTLN("Astro...");
     sun = calcSunTimes(t);
@@ -604,11 +671,7 @@ void loop() {
   // NTP sync
   if (ntpSyncDone == true) {
     DEBUG_PRINTLN("NTP...");
-
-    if (tBoot.tm_year == 0) {
-      getLocalTime(&tBoot, 100);
-    }
-
+    if (tBoot.tm_year == 0) getLocalTime(&tBoot, 100);
     tLastAstroUpdate = 0; // Recalculate after time sync
     ntpSyncDone = false;
   }
@@ -622,4 +685,31 @@ void loop() {
     tLastAstroUpdate = 0; // Recalculate after potential time change
     tLastDisplayUpdate = 0; // Full display refresh
   }
+}
+
+void setup() {
+  DEBUG_BEGIN(115200);
+  delay(2000);
+  DEBUG_PRINTLN("---");
+  DEBUG_PRINTF("%s %s %s\n", "Astro Clock", __DATE__, __TIME__);
+  preferences.begin("astro-clock", false);
+  pinMode(PIN_LEFT_BUTTON, INPUT);
+  pinMode(PIN_RIGHT_BUTTON, INPUT);
+  btStop();
+  tft.init();
+  tft.setRotation(0);
+  tft.setTextSize(1);
+  tft.fillScreen(TFT_BLACK);
+
+  WiFi.onEvent(onWiFiEvent);
+  WiFi.mode(WIFI_STA);
+  sntp_set_time_sync_notification_cb(onTimeSync);
+  configTzTime("CET-1CEST,M3.5.0/2,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
+
+  rebootCount = preferences.getUInt("rebootCount", 0) + 1;
+  preferences.putUInt("rebootCount", rebootCount);
+  DEBUG_PRINTF("Reboot count: %d\n", rebootCount);
+
+  resetReason = esp_reset_reason();
+  DEBUG_PRINTF("Reset reason: %d\n", resetReason);
 }
