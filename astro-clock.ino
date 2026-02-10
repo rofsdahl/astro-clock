@@ -1,3 +1,5 @@
+// astro-clock
+
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -27,7 +29,6 @@
 #define Y_MAX          240
 #define MAX_NETWORKS   20
 #define MAX_SSID_LEN   32
-#define NEXA_ADDRESS   0x038E8E8E
 
 typedef void (*VoidFunc)();
 
@@ -42,13 +43,18 @@ struct SunTimes {
 };
 
 struct Forecast {
+  float pressure;
   float temp;
+  float relHumidity;
+  float windFromDir;
+  float windSpeed;
 };
 
 struct Line {
   int8_t x1, y1, x2, y2;
 };
 
+constexpr uint32_t NEXA_ADDRESS = 0x038E8E8E;
 constexpr double LAT_DEG = 59.872;
 constexpr double LON_DEG = 10.797;
 constexpr double SOLAR_ALT_DEG = -0.833;
@@ -57,16 +63,18 @@ constexpr int ALTITUDE_M = 120;
 TFT_eSPI tft = TFT_eSPI();
 NexaTx nexaTx = NexaTx(PIN_RF_TX);
 Preferences preferences;
-volatile bool wifiStaGotIp = false;
-volatile bool ntpSyncDone = false;
-struct tm tBoot = {0};
-uint32_t rebootCount;
-esp_reset_reason_t resetReason;
 unsigned long tLastDisplayUpdate = 0;
 unsigned long tLastWifiAttempt = 0;
 unsigned long tLastWeatherForecast = 0;
 unsigned long tLastNexaUpdate = 0;
 unsigned long tLastAstroUpdate = 0;
+volatile bool wifiStaGotIp = false;
+volatile bool ntpSyncDone = false;
+struct tm tBoot = {0};
+uint32_t rebootCount;
+esp_reset_reason_t resetReason;
+int sunriseOffset;
+int sunsetOffset;
 
 // ===========================
 // Network functions
@@ -121,8 +129,14 @@ Forecast getWeatherForecast() {
     DEBUG_PRINTF("Heap after JSON: %u\n", ESP.getFreeHeap());
 
     if (!err) {
-      forecast.temp = doc["properties"]["timeseries"][0]["data"]["instant"]["details"]["air_temperature"];
-      DEBUG_PRINTF("Temp: %0.1f\n", forecast.temp);
+      forecast.pressure    = doc["properties"]["timeseries"][0]["data"]["instant"]["details"]["air_pressure_at_sea_level"];
+      forecast.temp        = doc["properties"]["timeseries"][0]["data"]["instant"]["details"]["air_temperature"];
+      forecast.relHumidity = doc["properties"]["timeseries"][0]["data"]["instant"]["details"]["relative_humidity"];
+      forecast.windFromDir = doc["properties"]["timeseries"][0]["data"]["instant"]["details"]["wind_from_direction"];
+      forecast.windSpeed   = doc["properties"]["timeseries"][0]["data"]["instant"]["details"]["wind_speed"];
+      DEBUG_PRINTF("Bp: %0.1f, T: %0.1f, RH: %0.1f, Ws: %0.1f, Wd: %0.1f\n",
+        forecast.pressure, forecast.temp, forecast.relHumidity, forecast.windFromDir, forecast.windSpeed
+      );
     }
     else {
       DEBUG_PRINTF("JSON error: %s\n", err.c_str());
@@ -306,7 +320,7 @@ void updateDisplay(
     bool wifiConnected,
     bool nexaOn,
     bool drawIcons) {
-    
+
   // Time
   constexpr uint8_t yTime = 0;
   int w = 0;
@@ -314,26 +328,33 @@ void updateDisplay(
   strftime(buf, sizeof(buf), " %H:%M ", &t);
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(buf, 67, yTime, 6);
+  tft.drawString(buf, X_MAX/2, yTime, 6);
 
   // Date
   constexpr uint8_t yDate = 48;
-  strftime(buf, sizeof(buf), " %a %e. %b ", &t);
-  tft.drawString(buf, 67, yDate, 4);
-
-  tft.setTextDatum(TL_DATUM);
+  strftime(buf, sizeof(buf), " %a %d.%m ", &t);
+  tft.drawString(buf, X_MAX/2, yDate, 4);
 
   // Temp
   constexpr uint8_t yTemp = 78;
-  tft.drawLine(0, yTemp-3, X_MAX, yTemp-3, TFT_DARKGREY);
-  snprintf(buf, sizeof(buf), "%0.1f *C", forecast.temp);
+  tft.drawLine(0, yTemp-3, X_MAX, yTemp-3, TFT_LIGHTGREY);
+  tft.setTextDatum(TL_DATUM);
+
+  snprintf(buf, sizeof(buf), "%0.1f", forecast.temp);
+  tft.setTextColor(forecast.temp>=0.0 ? TFT_YELLOW : TFT_SKYBLUE, TFT_BLACK);
   w = tft.drawString(buf, 0, yTemp, 4);
-  tft.fillRect(0+w, yTemp, X_MAX-w, 26, TFT_BLACK);
+  tft.fillRect(w, yTemp, (X_MAX/2)-w, 26, TFT_BLACK);
+
+  snprintf(buf, sizeof(buf), "%0.1f", forecast.relHumidity);
+  tft.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+  w = tft.drawString(buf, X_MAX/2, yTemp, 4);
+  tft.fillRect((X_MAX/2)+w, yTemp, (X_MAX/2)-w, 26, TFT_BLACK);
 
   // Sunrise
   constexpr uint8_t ySunrise = 146;
   tft.drawLine(0, ySunrise-4, X_MAX, ySunrise-4, TFT_DARKGREY);
   snprintf(buf, sizeof(buf), "%02d:%02d", sun.sunriseMin / 60, sun.sunriseMin % 60);
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   w = tft.drawString(buf, 43, ySunrise, 4);
   tft.fillRect(43+w, ySunrise, X_MAX-20-43-w, 26, TFT_BLACK);
 
@@ -347,8 +368,6 @@ void updateDisplay(
   constexpr uint8_t yStatus = 203;
   tft.drawLine(0, yStatus-4, X_MAX, yStatus-4, TFT_DARKGREY);
   tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-
   snprintf(buf, sizeof(buf), "Astro Clock %d:%d", rebootCount, resetReason);
   tft.drawString(buf, X_MAX, yStatus+9, 2);
   strftime(buf, sizeof(buf), "%d.%m.%y %H:%M", &tBoot);
@@ -384,21 +403,11 @@ void transmitNexaOff() {
 
 bool updateNexa(uint16_t dayMin, SunTimes sun) {
   bool isNight = sun.valid &&
-    (dayMin >= sun.sunsetMin-30 || dayMin < sun.sunriseMin+30);
+    (dayMin >= sun.sunsetMin-sunsetOffset || dayMin < sun.sunriseMin+sunriseOffset);
   bool isQuiet = dayMin < 6*60;
   bool isNexaOn = isNight && !isQuiet;
   transmitNexa(isNexaOn);
   return isNexaOn;
-}
-
-void updateWeather() {
-  tLastWeatherForecast = 0;
-  drawTransmitIcon(0, 223, TFT_MAGENTA, false, false);
-}
-
-void reboot() {
-  preferences.putUInt("rebootCount", 0);
-  ESP.restart();
 }
 
 // ===========================
@@ -459,17 +468,20 @@ int menuSystem(const MenuItem items[],
     if (digitalRead(PIN_RIGHT_BUTTON) == LOW) {
       delay(50);
 
+      DEBUG_PRINTF("Selected: %d\n", selected);
       if (items[selected].action == nullptr) {
         waitUntilBothReleased();
         return selected;
       }
-
-      items[selected].action();
-      displayItems(items, itemCount, selected, y, font, fontHeight);
-      waitUntilBothReleased();
+      else {
+        items[selected].action();
+        displayItems(items, itemCount, selected, y, font, fontHeight);
+        waitUntilBothReleased();
+      }
     }
   }
   DEBUG_PRINTLN("This should never happen");
+  ESP.restart();
   return -1;
 }
 
@@ -500,7 +512,7 @@ void selectWiFiNetwork() {
   WiFi.scanDelete();
 
   int selected = menuSystem(menuItems, itemCount, 30, 2, 16);
-  if (selected >= 0 && selected < itemCount-1) {
+  if (selected < itemCount-1) {
     DEBUG_PRINTF("Network selected: %s\n", ssids[selected]);
     preferences.putString("ssid", ssids[selected]);
   }
@@ -553,7 +565,7 @@ void enterWiFiPassword() {
       if (ch == 0 || index >= sizeof(password)-1) {
         break;
       }
-      x += tft.drawChar('*', x, y, 4); 
+      x += tft.drawChar('*', x, y, 4);
       if (x > 110) {
         x = 0;
         y += 26;
@@ -574,6 +586,57 @@ void enterWiFiPassword() {
   tft.fillScreen(TFT_BLACK);
 }
 
+void sunriseOffsetMenu() {
+  static const MenuItem menuItems[] = {
+    {"-30 min", nullptr},
+    {"-15 min", nullptr},
+    {"0 min", nullptr},
+    {"+15 min", nullptr},
+    {"+30 min", nullptr},
+    {"Exit", nullptr}
+  };
+  static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
+  int selected = menuSystem(menuItems, itemCount, 0, 4, 26);
+  if (selected < itemCount-1) {
+    sunriseOffset = selected * 15 - 30;
+    preferences.putInt("sunriseOffset", sunriseOffset);
+    DEBUG_PRINTF("Sunrise offset: %d\n", sunriseOffset);
+  }
+  tft.fillScreen(TFT_BLACK);
+}
+
+void sunsetOffsetMenu() {
+  static const MenuItem menuItems[] = {
+    {"-30 min", nullptr},
+    {"-15 min", nullptr},
+    {"0 min", nullptr},
+    {"+15 min", nullptr},
+    {"+30 min", nullptr},
+    {"Exit", nullptr}
+  };
+  static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
+  int selected = menuSystem(menuItems, itemCount, 0, 4, 26);
+  if (selected < itemCount-1) {
+    sunsetOffset = selected * 15 - 30;
+    preferences.putInt("sunsetOffset", sunsetOffset);
+    DEBUG_PRINTF("Sunset offset: %d\n", sunsetOffset);
+  }
+  tft.fillScreen(TFT_BLACK);
+}
+
+void nexaConfigMenu() {
+  static const MenuItem menuItems[] = {
+    {"Nexa ON", transmitNexaOn},
+    {"Nexa OFF", transmitNexaOff},
+    {"Sunrise offset", sunriseOffsetMenu},
+    {"Sunset offset", sunsetOffsetMenu},
+    {"Exit", nullptr}
+  };
+  static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
+  menuSystem(menuItems, itemCount, 0, 4, 26);
+  tft.fillScreen(TFT_BLACK);
+}
+
 void wifiConfigMenu() {
   static const MenuItem menuItems[] = {
     {"Network...", selectWiFiNetwork},
@@ -585,13 +648,22 @@ void wifiConfigMenu() {
   tft.fillScreen(TFT_BLACK);
 }
 
+void triggerWeatherUpdate() {
+  tLastWeatherForecast = 0;
+  drawTransmitIcon(0, 223, TFT_MAGENTA, false, false);
+}
+
+void triggerReboot() {
+  preferences.putUInt("rebootCount", 0);
+  ESP.restart();
+}
+
 void mainMenu() {
   static const MenuItem menuItems[] = {
-    {"Nexa ON", transmitNexaOn},
-    {"Nexa OFF", transmitNexaOff},
+    {"Nexa config", nexaConfigMenu},
     {"WiFi config", wifiConfigMenu},
-    {"Get weather", updateWeather},
-    {"Reboot", reboot},
+    {"Get weather", triggerWeatherUpdate},
+    {"Reboot", triggerReboot},
     {"Exit", nullptr}
   };
   static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
@@ -692,7 +764,18 @@ void setup() {
   delay(2000);
   DEBUG_PRINTLN("---");
   DEBUG_PRINTF("%s %s %s\n", "Astro Clock", __DATE__, __TIME__);
+
   preferences.begin("astro-clock", false);
+  rebootCount = preferences.getUInt("rebootCount", 0) + 1;
+  preferences.putUInt("rebootCount", rebootCount);
+  DEBUG_PRINTF("Reboot count: %d\n", rebootCount);
+  resetReason = esp_reset_reason();
+  DEBUG_PRINTF("Reset reason: %d\n", resetReason);
+  sunriseOffset = preferences.getInt("sunriseOffset", sunriseOffset);
+  DEBUG_PRINTF("Sunrise offset: %d\n", sunriseOffset);
+  sunsetOffset = preferences.getInt("sunsetOffset", sunsetOffset);
+  DEBUG_PRINTF("Sunset offset: %d\n", sunsetOffset);
+
   pinMode(PIN_LEFT_BUTTON, INPUT);
   pinMode(PIN_RIGHT_BUTTON, INPUT);
   btStop();
@@ -705,11 +788,4 @@ void setup() {
   WiFi.mode(WIFI_STA);
   sntp_set_time_sync_notification_cb(onTimeSync);
   configTzTime("CET-1CEST,M3.5.0/2,M10.5.0/3", "pool.ntp.org", "time.nist.gov");
-
-  rebootCount = preferences.getUInt("rebootCount", 0) + 1;
-  preferences.putUInt("rebootCount", rebootCount);
-  DEBUG_PRINTF("Reboot count: %d\n", rebootCount);
-
-  resetReason = esp_reset_reason();
-  DEBUG_PRINTF("Reset reason: %d\n", resetReason);
 }
