@@ -442,7 +442,7 @@ void displayItems(const MenuItem items[],
   }
 }
 
-int menuSystem(const MenuItem items[],
+int menuSelect(const MenuItem items[],
                int itemCount,
                int y,
                uint8_t font,
@@ -511,7 +511,7 @@ void selectWiFiNetwork() {
 
   WiFi.scanDelete();
 
-  int selected = menuSystem(menuItems, itemCount, 30, 2, 16);
+  int selected = menuSelect(menuItems, itemCount, 30, 2, 16);
   if (selected < itemCount-1) {
     DEBUG_PRINTF("Network selected: %s\n", ssids[selected]);
     preferences.putString("ssid", ssids[selected]);
@@ -596,7 +596,7 @@ void sunriseOffsetMenu() {
     {"Exit", nullptr}
   };
   static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
-  int selected = menuSystem(menuItems, itemCount, 0, 4, 26);
+  int selected = menuSelect(menuItems, itemCount, 0, 4, 26);
   if (selected < itemCount-1) {
     sunriseOffset = selected * 15 - 30;
     preferences.putInt("sunriseOffset", sunriseOffset);
@@ -615,7 +615,7 @@ void sunsetOffsetMenu() {
     {"Exit", nullptr}
   };
   static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
-  int selected = menuSystem(menuItems, itemCount, 0, 4, 26);
+  int selected = menuSelect(menuItems, itemCount, 0, 4, 26);
   if (selected < itemCount-1) {
     sunsetOffset = selected * 15 - 30;
     preferences.putInt("sunsetOffset", sunsetOffset);
@@ -633,7 +633,7 @@ void nexaConfigMenu() {
     {"Exit", nullptr}
   };
   static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
-  menuSystem(menuItems, itemCount, 0, 4, 26);
+  menuSelect(menuItems, itemCount, 0, 4, 26);
   tft.fillScreen(TFT_BLACK);
 }
 
@@ -644,7 +644,7 @@ void wifiConfigMenu() {
     {"Exit", nullptr}
   };
   static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
-  menuSystem(menuItems, itemCount, 0, 4, 26);
+  menuSelect(menuItems, itemCount, 0, 4, 26);
   tft.fillScreen(TFT_BLACK);
 }
 
@@ -667,7 +667,7 @@ void mainMenu() {
     {"Exit", nullptr}
   };
   static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
-  menuSystem(menuItems, itemCount, 0, 4, 26);
+  menuSelect(menuItems, itemCount, 0, 4, 26);
   tft.fillScreen(TFT_BLACK);
 }
 
