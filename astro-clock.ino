@@ -73,8 +73,6 @@ volatile bool ntpSyncDone = false;
 struct tm tBoot = {0};
 uint32_t rebootCount;
 esp_reset_reason_t resetReason;
-int sunriseOffset;
-int sunsetOffset;
 
 // ===========================
 // Network functions
@@ -403,7 +401,7 @@ void transmitNexaOff() {
 
 bool updateNexa(uint16_t dayMin, SunTimes sun) {
   bool isNight = sun.valid &&
-    (dayMin >= sun.sunsetMin-sunsetOffset || dayMin < sun.sunriseMin+sunriseOffset);
+    (dayMin >= sun.sunsetMin || dayMin < sun.sunriseMin+30);
   bool isQuiet = dayMin < 6*60;
   bool isNexaOn = isNight && !isQuiet;
   transmitNexa(isNexaOn);
@@ -586,57 +584,6 @@ void enterWiFiPassword() {
   tft.fillScreen(TFT_BLACK);
 }
 
-void sunriseOffsetMenu() {
-  static const MenuItem menuItems[] = {
-    {"-30 min", nullptr},
-    {"-15 min", nullptr},
-    {"0 min", nullptr},
-    {"+15 min", nullptr},
-    {"+30 min", nullptr},
-    {"Exit", nullptr}
-  };
-  static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
-  int selected = menuSelect(menuItems, itemCount, 0, 4, 26);
-  if (selected < itemCount-1) {
-    sunriseOffset = selected * 15 - 30;
-    preferences.putInt("sunriseOffset", sunriseOffset);
-    DEBUG_PRINTF("Sunrise offset: %d\n", sunriseOffset);
-  }
-  tft.fillScreen(TFT_BLACK);
-}
-
-void sunsetOffsetMenu() {
-  static const MenuItem menuItems[] = {
-    {"-30 min", nullptr},
-    {"-15 min", nullptr},
-    {"0 min", nullptr},
-    {"+15 min", nullptr},
-    {"+30 min", nullptr},
-    {"Exit", nullptr}
-  };
-  static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
-  int selected = menuSelect(menuItems, itemCount, 0, 4, 26);
-  if (selected < itemCount-1) {
-    sunsetOffset = selected * 15 - 30;
-    preferences.putInt("sunsetOffset", sunsetOffset);
-    DEBUG_PRINTF("Sunset offset: %d\n", sunsetOffset);
-  }
-  tft.fillScreen(TFT_BLACK);
-}
-
-void nexaConfigMenu() {
-  static const MenuItem menuItems[] = {
-    {"Nexa ON", transmitNexaOn},
-    {"Nexa OFF", transmitNexaOff},
-    {"Sunrise offset", sunriseOffsetMenu},
-    {"Sunset offset", sunsetOffsetMenu},
-    {"Exit", nullptr}
-  };
-  static const int itemCount = sizeof(menuItems) / sizeof(menuItems[0]);
-  menuSelect(menuItems, itemCount, 0, 4, 26);
-  tft.fillScreen(TFT_BLACK);
-}
-
 void wifiConfigMenu() {
   static const MenuItem menuItems[] = {
     {"Network...", selectWiFiNetwork},
@@ -660,7 +607,8 @@ void triggerReboot() {
 
 void mainMenu() {
   static const MenuItem menuItems[] = {
-    {"Nexa config", nexaConfigMenu},
+    {"Nexa ON", transmitNexaOn},
+    {"Nexa OFF", transmitNexaOff},
     {"WiFi config", wifiConfigMenu},
     {"Get weather", triggerWeatherUpdate},
     {"Reboot", triggerReboot},
@@ -771,10 +719,6 @@ void setup() {
   DEBUG_PRINTF("Reboot count: %d\n", rebootCount);
   resetReason = esp_reset_reason();
   DEBUG_PRINTF("Reset reason: %d\n", resetReason);
-  sunriseOffset = preferences.getInt("sunriseOffset", sunriseOffset);
-  DEBUG_PRINTF("Sunrise offset: %d\n", sunriseOffset);
-  sunsetOffset = preferences.getInt("sunsetOffset", sunsetOffset);
-  DEBUG_PRINTF("Sunset offset: %d\n", sunsetOffset);
 
   pinMode(PIN_LEFT_BUTTON, INPUT);
   pinMode(PIN_RIGHT_BUTTON, INPUT);
