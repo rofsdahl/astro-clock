@@ -237,42 +237,6 @@ double calcMoonPhase(const tm& t) {
 // Display functions
 // ===========================
 
-void drawWindArrow(int xc, int yc, float wd, int l) {
-
-  float theta = (270.0 - wd) * DEG_TO_RAD;
-  float dx = cos(theta);
-  float dy = sin(theta);
-
-  // Main line endpoints (through center)
-  int x1 = xc - l * dx;
-  int y1 = yc + l * dy;
-  int x2 = xc + l * dx;
-  int y2 = yc - l * dy;
-  tft.drawLine(x1, y1, x2, y2, TFT_WHITE);
-
-  // Arrowhead
-  float arrowLength = l * 0.20; // 20% of length
-  float arrowWidth  = l * 0.10; // 10% of length
-
-  // Perpendicular unit vector
-  float px = -dy;
-  float py = dx;
-
-  // Base of arrowhead
-  float bx = x2 - arrowLength * dx;
-  float by = y2 + arrowLength * dy;
-
-  // Side points
-  int x3 = bx + arrowWidth * px;
-  int y3 = by - arrowWidth * py;
-
-  int x4 = bx - arrowWidth * px;
-  int y4 = by + arrowWidth * py;
-
-  // Filled arrowhead looks nicer on TFT
-  tft.fillTriangle(x2, y2, x3, y3, x4, y4, TFT_WHITE);
-}
-
 void drawSunriseIcon(int x, int y) {
   tft.fillCircle(x+21, y+17,     10, TFT_YELLOW);
   tft.fillRect  (x+11, y+18, 21, 10, TFT_BLACK);
@@ -335,6 +299,42 @@ void drawMoonPhaseIcon(int x, int y, double phase) {
   tft.drawCircle(x+10, y+10, 10, TFT_DARKGREY);
 }
 
+void drawWindArrow(int xc, int yc, float windFromDir, int len) {
+
+  float theta = (270.0 - windFromDir) * PI / 180.0;
+  float dx = cos(theta);
+  float dy = sin(theta);
+
+  // Line endpoints (through center)
+  int x1 = xc - len * dx;
+  int y1 = yc + len * dy;
+  int x2 = xc + len * dx;
+  int y2 = yc - len * dy;
+  tft.drawLine(x1, y1, x2, y2, TFT_WHITE);
+
+  // Arrowhead
+  float arrowLen = len * 0.20; // 20% of length
+  float arrowWidth  = len * 0.10; // 10% of length
+
+  // Perpendicular unit vector
+  float px = -dy;
+  float py = dx;
+
+  // Base of arrowhead
+  float bx = x2 - arrowLen * dx;
+  float by = y2 + arrowLen * dy;
+
+  // Side points
+  int x3 = bx + arrowWidth * px;
+  int y3 = by - arrowWidth * py;
+
+  int x4 = bx - arrowWidth * px;
+  int y4 = by + arrowWidth * py;
+
+  // Filled arrowhead
+  tft.fillTriangle(x2, y2, x3, y3, x4, y4, TFT_WHITE);
+}
+
 void drawTransmitIcon(int x, int y, uint16_t color, bool on, bool tx) {
   tft.fillRect(x, y, 30, 17, TFT_BLACK);
   if (on) tft.fillCircle(x+8, y+8, 8, color);
@@ -383,6 +383,9 @@ void updateDisplay(
   tft.setTextColor(TFT_DARKGREEN, TFT_BLACK);
   w = tft.drawString(buf, X_MAX/2, yTemp, 4);
   tft.fillRect((X_MAX/2)+w, yTemp, (X_MAX/2)-w, 26, TFT_BLACK);
+
+  // Wind
+  drawWindArrow(100, yTemp+20, forecast.windFromDir, 15);
 
   // Sunrise
   constexpr uint8_t ySunrise = 146;
