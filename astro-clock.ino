@@ -237,6 +237,42 @@ double calcMoonPhase(const tm& t) {
 // Display functions
 // ===========================
 
+void drawWindArrow(int xc, int yc, float wd, int l) {
+
+  float theta = (270.0 - wd) * DEG_TO_RAD;
+  float dx = cos(theta);
+  float dy = sin(theta);
+
+  // Main line endpoints (through center)
+  int x1 = xc - l * dx;
+  int y1 = yc + l * dy;
+  int x2 = xc + l * dx;
+  int y2 = yc - l * dy;
+  tft.drawLine(x1, y1, x2, y2, TFT_WHITE);
+
+  // Arrowhead
+  float arrowLength = l * 0.20; // 20% of length
+  float arrowWidth  = l * 0.10; // 10% of length
+
+  // Perpendicular unit vector
+  float px = -dy;
+  float py = dx;
+
+  // Base of arrowhead
+  float bx = x2 - arrowLength * dx;
+  float by = y2 + arrowLength * dy;
+
+  // Side points
+  int x3 = bx + arrowWidth * px;
+  int y3 = by - arrowWidth * py;
+
+  int x4 = bx - arrowWidth * px;
+  int y4 = by + arrowWidth * py;
+
+  // Filled arrowhead looks nicer on TFT
+  tft.fillTriangle(x2, y2, x3, y3, x4, y4, TFT_WHITE);
+}
+
 void drawSunriseIcon(int x, int y) {
   tft.fillCircle(x+21, y+17,     10, TFT_YELLOW);
   tft.fillRect  (x+11, y+18, 21, 10, TFT_BLACK);
